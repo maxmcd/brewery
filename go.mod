@@ -3,6 +3,7 @@ module github.com/maxmcd/brewery
 go 1.20
 
 require (
+	github.com/maxmcd/reptar v0.0.0-20220507012651-38fabfc9d43a
 	github.com/testcontainers/testcontainers-go v0.24.1
 	gopkg.in/dnaeon/go-vcr.v3 v3.1.2
 )
@@ -24,6 +25,7 @@ require (
 	github.com/golang/protobuf v1.5.3 // indirect
 	github.com/google/uuid v1.3.1 // indirect
 	github.com/klauspost/compress v1.16.0 // indirect
+	github.com/klauspost/pgzip v1.2.5 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/moby/patternmatcher v0.5.0 // indirect
