@@ -1,0 +1,16 @@
+{
+  "name": "bun-exp",
+  "module": "index.ts",
+  "type": "module",
+  "devDependencies": {
+    "@types/tar": "^6.1.6",
+    "bun-types": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "tar": "^6.2.0",
+    "zlib": "^1.0.5"
+  }
+}
