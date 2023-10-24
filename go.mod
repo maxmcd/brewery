@@ -3,8 +3,10 @@ module github.com/maxmcd/brewery
 go 1.20
 
 require (
+	github.com/cristalhq/hedgedhttp v0.9.1
 	github.com/maxmcd/reptar v0.0.0-20220507012651-38fabfc9d43a
 	github.com/testcontainers/testcontainers-go v0.24.1
+	golang.org/x/sync v0.3.0
 	gopkg.in/dnaeon/go-vcr.v3 v3.1.2
 )
 

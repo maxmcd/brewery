@@ -2,6 +2,7 @@ package brewery
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 )
 
 var (
@@ -37,8 +40,20 @@ func NewBrewery(opts ...Option) (*Brewery, error) {
 	for _, o := range opts {
 		o(b)
 	}
+	if b.httpClient == nil {
+		b.httpClient = &http.Client{}
+		// timeout := 5 * time.Millisecond
+		// upto := 2
+		// hedged, err := hedgedhttp.NewClient(timeout, upto, &http.Client{})
+		// if err != nil {
+		// 	return nil, fmt.Errorf("error creating hedged http client: %w", err)
+		// }
+		// b.httpClient = hedged
+
+	}
 	return b, nil
 }
+
 func (b *Brewery) cellar(a ...string) string {
 	return filepath.Join(append([]string{b.prefix, "/Cellar"}, a...)...)
 }
@@ -47,42 +62,115 @@ func (b *Brewery) getLocalVersion(name string) {
 	os.Stat(b.cellar(name))
 	// TODO...
 }
-
-func (b *Brewery) FetchFormula(name string) (Formula, error) {
-	url := brewAPIRoot + "formula/" + name + ".json"
+func (b *Brewery) _getRequest(ctx context.Context, url string, rm func(*http.Request)) (resp *http.Response, err error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return Formula{}, err
+		return nil, fmt.Errorf("error making request for %s: %w", url, err)
 	}
-	resp, err := b.httpClient.Do(req)
+	req = req.WithContext(ctx)
+	rm(req)
+	resp, err = b.httpClient.Do(req)
 	if err != nil {
-		return Formula{}, fmt.Errorf("error making %s request to %s: %w", http.MethodGet, url, err)
+		return nil, fmt.Errorf("error making %s request to %s: %w", http.MethodGet, url, err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		var buf bytes.Buffer
 		if resp.Body != nil {
 			_, _ = io.Copy(&buf, resp.Body)
+			resp.Body.Close()
 		}
-		return Formula{}, fmt.Errorf("unexpected status code %d when making %s request to %s: %s",
+		return nil, fmt.Errorf("unexpected status code %d when making %s request to %s: %s",
 			resp.StatusCode, http.MethodGet, url, buf.String())
 	}
-	var f Formula
-	if err := json.NewDecoder(resp.Body).Decode(&f); err != nil {
-		return Formula{}, fmt.Errorf("error parsing json for formula %q: %w", name, err)
-	}
-	return f, nil
+	return resp, nil
 }
 
-func (f Formula) ManifestURL() string {
-	u := fmt.Sprintf(
-		"%s/%s/manifests/%s",
-		f.Bottle.Stable.RootURL,
-		f.Name, f.Versions.Stable,
-	)
-	if f.Revision != 0 {
-		u += fmt.Sprintf("_%d", f.Revision)
+func (b *Brewery) getRequest(ctx context.Context, url string, rm func(*http.Request), v interface{}) (err error) {
+	resp, err := b._getRequest(ctx, url, rm)
+	if err != nil {
+		return err
 	}
-	return u
+	defer resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
+		return fmt.Errorf("error parsing json for response from %q: %w", url, err)
+	}
+	return nil
+}
+
+func (b *Brewery) FetchFormula(ctx context.Context, name string) (f Formula, err error) {
+	url := brewAPIRoot + "formula/" + name + ".json"
+	return f, b.getRequest(ctx, url, func(r *http.Request) {}, &f)
+}
+
+func (b *Brewery) FetchManifest(ctx context.Context, url string) (m Manifest, err error) {
+	return m, b.getRequest(ctx, url, prepareGHCRRequest, &m)
+}
+
+func (b *Brewery) FetchBottleFiles(ctx context.Context, url string) (resp *http.Response, err error) {
+	return b._getRequest(ctx, url, prepareGHCRRequest)
+}
+
+func jsonPrettyPrint[T any](t T) {
+	e := json.NewEncoder(os.Stdout)
+	e.SetIndent("", "  ")
+	_ = e.Encode(t)
+}
+
+func (b *Brewery) StableBottleURL(f Formula) (string, error) {
+	files := f.Bottle.Stable.Files[b.bottleOSString()]
+	if files.Cellar != ":any" && files.Cellar != ":any_skip_relocation" && files.Cellar != b.cellar() {
+		jsonPrettyPrint(f)
+		return "", fmt.Errorf("cellar mismatch: %q != %q", files.Cellar, b.prefix)
+	}
+	return files.URL, nil
+}
+
+func (b *Brewery) bottleOSString() string {
+	if runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
+		return "x86_64_linux"
+	}
+	return ""
+}
+
+func prepareGHCRRequest(req *http.Request) {
+	req.Header.Set("Accept", "application/vnd.oci.image.index.v1+json")
+	req.Header.Set("Authorization", "Bearer QQ==")
+	req.Header.Set("User-Agent", "Brewery/4.1.13 (Linux; x86_64 Ubuntu 22.04.3 LTS) curl/7.81.0")
+}
+
+func findFormulas(allFormulas io.Reader, names ...string) (formulas []Formula, err error) {
+	nameSet := map[string]struct{}{}
+	for _, name := range names {
+		nameSet[name] = struct{}{}
+	}
+	decoder := json.NewDecoder(allFormulas)
+	if _, err := decoder.Token(); err != nil {
+		return nil, fmt.Errorf("error decoding first token of formula reader: %w", err)
+	}
+	for decoder.More() {
+		var f Formula
+		if err := decoder.Decode(&f); err != nil {
+			return nil, fmt.Errorf("error decoding formula within formula list: %w", err)
+		}
+		if _, found := nameSet[f.Name]; found {
+			formulas = append(formulas, f)
+
+			if len(names) == len(formulas) {
+				return formulas, nil
+			}
+		}
+	}
+	if len(formulas) == len(names) {
+		return formulas, nil
+	}
+	for _, f := range formulas {
+		delete(nameSet, f.Name)
+	}
+	var missing []string
+	for name := range nameSet {
+		missing = append(missing, name)
+	}
+	return nil, fmt.Errorf("missing formulas: %v", missing)
 }
 
 type Formula struct {
@@ -187,6 +275,21 @@ type Formula struct {
 	} `json:"variations"`
 }
 
+func (f Formula) ManifestURL() string {
+	u := fmt.Sprintf(
+		"%s/%s/manifests/%s",
+		f.Bottle.Stable.RootURL,
+		strings.Replace(f.Name, "@", "/", 1), f.Versions.Stable,
+	)
+	if f.Revision != 0 {
+		u += fmt.Sprintf("_%d", f.Revision)
+	}
+	if f.Bottle.Stable.Rebuild != 0 {
+		u += fmt.Sprintf("-%d", f.Bottle.Stable.Rebuild)
+	}
+	return u
+}
+
 type Manifest struct {
 	SchemaVersion int `json:"schemaVersion"`
 	Manifests     []struct {
@@ -210,18 +313,29 @@ type Manifest struct {
 	Annotations map[string]string `json:"annotations"`
 }
 
+func (m Manifest) TabForCurrentOS() (BrewTab, error) {
+	for _, m := range m.Manifests {
+		if m.Platform.Os == runtime.GOOS && m.Platform.Architecture == runtime.GOARCH {
+			return m.Annotations.ShBrewTab.BrewTab, nil
+		}
+	}
+	return BrewTab{}, fmt.Errorf("no tab found for %s/%s", runtime.GOOS, runtime.GOARCH)
+}
+
+type Dependency struct {
+	FullName         string `json:"full_name"`
+	Version          string `json:"version"`
+	DeclaredDirectly bool   `json:"declared_directly"`
+}
+
 type BrewTab struct {
-	HomebrewVersion     string   `json:"homebrew_version"`
-	ChangedFiles        []string `json:"changed_files"`
-	SourceModifiedTime  int      `json:"source_modified_time"`
-	Compiler            string   `json:"compiler"`
-	RuntimeDependencies []struct {
-		FullName         string `json:"full_name"`
-		Version          string `json:"version"`
-		DeclaredDirectly bool   `json:"declared_directly"`
-	} `json:"runtime_dependencies"`
-	Arch    string `json:"arch"`
-	BuiltOn struct {
+	HomebrewVersion     string       `json:"homebrew_version"`
+	ChangedFiles        []string     `json:"changed_files"`
+	SourceModifiedTime  int          `json:"source_modified_time"`
+	Compiler            string       `json:"compiler"`
+	RuntimeDependencies []Dependency `json:"runtime_dependencies"`
+	Arch                string       `json:"arch"`
+	BuiltOn             struct {
 		Os            string `json:"os"`
 		OsVersion     string `json:"os_version"`
 		CPUFamily     string `json:"cpu_family"`
@@ -253,7 +367,7 @@ func (b *BrewTabField) UnmarshalJSON(v []byte) error {
 func getBrewPrefix() (string, error) {
 	b, err := exec.Command("brew", "--prefix").CombinedOutput()
 	if err == nil {
-		return string(b), nil
+		return strings.TrimSpace(string(b)), nil
 	}
 	return "", fmt.Errorf("error calling `brew --prefix`: %w: %s", err, string(b))
 }

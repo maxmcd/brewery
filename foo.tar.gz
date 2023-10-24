@@ -1,0 +1,17 @@
+﻿<?xml version="1.0" encoding="utf-8"?><Error><Code>AuthenticationFailed</Code><Message>Server failed to authenticate the request. Make sure the value of Authorization header is formed correctly including the signature.
+RequestId:57303473-301e-009f-16ef-f663f0000000
+Time:2023-10-04T18:19:39.5116820Z</Message><AuthenticationErrorDetail>Signature did not match. String to sign used was r
+
+2023-10-04T18:25:00Z
+/blob/ghcr1production/ghcr1/blobs/sha256:7dc8f7ebbfcb22adcd5535a8da083ed8aa3c42c8579c465a2263d778868bc058
+
+
+https
+2019-12-12
+b
+
+
+
+
+
+</AuthenticationErrorDetail></Error>

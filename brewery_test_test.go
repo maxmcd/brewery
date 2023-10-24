@@ -28,34 +28,12 @@ func TestGetFormula(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	formula, err := b.FetchFormula("ruby")
+	formula, err := b.FetchFormula(context.Background(), "ruby")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	fmt.Println(formula.ManifestURL())
-
-}
-
-func TestFormula(t *testing.T) {
-	f, err := os.Open("/home/ubuntu/.cache/Homebrew/api/formula.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	decoder := json.NewDecoder(f)
-	if _, err := decoder.Token(); err != nil {
-		t.Fatal(err)
-	}
-	for decoder.More() {
-		var formula brewery.Formula
-		if err := decoder.Decode(&formula); err != nil {
-			t.Fatal(err)
-		}
-		if formula.Name == "ruby" {
-			e := json.NewEncoder(os.Stdout)
-			e.SetIndent("", "  ")
-			_ = e.Encode(formula)
-		}
-	}
 }
 
 func TestManifestJson(t *testing.T) {
