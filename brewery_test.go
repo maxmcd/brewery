@@ -2,17 +2,16 @@ package brewery
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"testing"
-	"time"
 
 	"github.com/maxmcd/brewery/tracing"
 	"github.com/maxmcd/reptar"
 	"golang.org/x/sync/errgroup"
+	"gopkg.in/dnaeon/go-vcr.v3/recorder"
 )
 
 func Test_cloneDirWithSymlinks(t *testing.T) {
@@ -78,110 +77,113 @@ func BenchmarkTarGzipUnarchive(b *testing.B) {
 	}
 }
 
-func TestFormula(t *testing.T) {
-	ctx, span := networkTracer.Start(context.Background(), "brewery-test")
-	defer span.End()
-	defer tracing.Stop()
-	f, err := os.Open("/home/ubuntu/.cache/Homebrew/api/formula.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	formulas, err := findFormulas(f, "ruby")
-	if err != nil {
-		t.Fatal(err)
-	}
-	formula := formulas[0]
-
-	e := json.NewEncoder(os.Stdout)
-	e.SetIndent("", "  ")
-	_ = e.Encode(formula)
-
-	b, err := NewBrewery()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	m, err := b.FetchManifest(ctx, formula.ManifestURL())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	tb, err := m.TabForCurrentOS()
-	if err != nil {
-		t.Fatal(err)
-	}
-	{
-		e := json.NewEncoder(os.Stdout)
-		e.SetIndent("", "  ")
-		_ = e.Encode(tb)
-	}
-
-	_, _ = f.Seek(0, 0)
-	formulas, err = findFormulas(f, mapSlice(tb.RuntimeDependencies, func(d Dependency) string {
-		return d.FullName
-	})...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	{
-		e := json.NewEncoder(os.Stdout)
-		e.SetIndent("", "  ")
-		_ = e.Encode(mapSlice(formulas, func(f Formula) string { return f.Name }))
-	}
-	dir := t.TempDir()
-
-	eg, ctx := errgroup.WithContext(ctx)
-	for _, f := range formulas {
-		formula := f
-		eg.Go(func() error {
-			url, err := b.StableBottleURL(formula)
-			if err != nil {
-				return err
-			}
-			start := time.Now()
-			resp, err := b.FetchBottleFiles(ctx, url)
-			if err != nil {
-				return err
-			}
-			_ = dir
-			f, err := os.CreateTemp(dir, "")
-			if err != nil {
-				return err
-			}
-			_, _ = io.Copy(f, resp.Body)
-			_ = f.Close()
-			_ = resp.Body.Close()
-			fmt.Printf("%s %s: %s %s\n", url, resp.Header.Get("Content-Length"), formula.Name, time.Since(start))
-			return nil
-		})
-	}
-	if err := eg.Wait(); err != nil {
-		t.Fatal(err)
-	}
-}
-
 type T interface {
 	Fatal(args ...interface{})
 	Fatalf(format string, args ...interface{})
+	TempDir() string
+	Cleanup(func())
+}
+
+func newRecorder(t T) *recorder.Recorder {
+	recorder, err := recorder.NewWithOptions(&recorder.Options{
+		CassetteName: "brewery",
+		Mode:         recorder.ModeReplayWithNewEpisodes,
+		// Mode:         recorder.ModeRecordOnly,
+		// SkipRequestLatency: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() {
+		if err := recorder.Stop(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	return recorder
+}
+
+func brewery(t T) *Brewery {
+	recorder := newRecorder(t)
+	b, err := NewBrewery(
+		OptionWithHTTPClient(&http.Client{Transport: recorder}),
+		OptionWithCache(t.TempDir()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func TestInstall(t *testing.T) {
+	names := []string{"Install", "InstallParallel", "InstallParallel2"}
+	for i, fn := range []func(context.Context, *Brewery) error{
+		func(ctx context.Context, b *Brewery) error {
+			return b.Install(ctx, "ruby")
+		},
+		func(ctx context.Context, b *Brewery) error {
+			return b.InstallParallel(ctx, "ruby")
+		},
+		func(ctx context.Context, b *Brewery) error {
+			return b.InstallParallel2(ctx, "ruby")
+		},
+	} {
+		t.Run(names[i], func(t *testing.T) {
+			ctx, span := networkTracer.Start(context.Background(), names[i])
+			defer span.End()
+			br := brewery(t)
+			if err := fn(ctx, br); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	tracing.Stop()
+}
+
+func BenchmarkInstall(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		br := brewery(b)
+		if err := br.Install(context.Background(), "ruby"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkInstallParallel(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		br := brewery(b)
+		if err := br.InstallParallel(context.Background(), "ruby"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+func BenchmarkInstallParallel2(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		br := brewery(b)
+		if err := br.InstallParallel2(context.Background(), "ruby"); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
 
 func BenchmarkManifestCalls(b *testing.B) {
-	f, err := os.Open("/home/ubuntu/.cache/Homebrew/api/formula.json")
-	if err != nil {
-		b.Fatal(err)
-	}
-	formulas, err := findFormulas(f, "ruby")
-	if err != nil {
-		b.Fatal(err)
-	}
-	formula := formulas[0]
-
+	ctx := context.Background()
 	br, err := NewBrewery()
 	if err != nil {
 		b.Fatal(err)
 	}
 
-	m, err := br.FetchManifest(context.Background(), formula.ManifestURL())
+	f, err := os.Open(br.cache("api", "formula.json"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	formulas, err := findFormulas(ctx, f, "ruby")
+	if err != nil {
+		b.Fatal(err)
+	}
+	formula := formulas[0]
+
+	m, err := br.DownloadManifest(ctx, formula)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -192,7 +194,7 @@ func BenchmarkManifestCalls(b *testing.B) {
 	}
 
 	_, _ = f.Seek(0, 0)
-	formulas, err = findFormulas(f, mapSlice(tb.RuntimeDependencies, func(d Dependency) string {
+	formulas, err = findFormulas(ctx, f, mapSlice(tb.RuntimeDependencies, func(d Dependency) string {
 		return d.FullName
 	})...)
 	if err != nil {
@@ -204,7 +206,7 @@ func BenchmarkManifestCalls(b *testing.B) {
 		for _, f := range formulas {
 			f := f
 			eg.Go(func() error {
-				m, err := br.FetchManifest(ctx, f.ManifestURL())
+				m, err := br.DownloadManifest(ctx, f)
 				_ = m
 				return err
 			})

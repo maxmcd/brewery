@@ -2,87 +2,63 @@ package tracing
 
 import (
 	"context"
+	"log"
 	"os"
-	"strings"
+	"sync"
 	"time"
 
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/exporters/jaeger"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/sdk/resource"
-	tracesdk "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.20.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
-const (
-	service     = "brewery"
-	environment = "production"
-	id          = 1
-)
+var lock sync.Mutex
+var tps []*sdktrace.TracerProvider
 
-// tracerProvider returns an OpenTelemetry TracerProvider configured to use
-// the Jaeger exporter that will send spans to the provided url. The returned
-// TracerProvider will also use a Resource configured with all the information
-// about the application.
-func tracerProvider(hostAndPort string) (*tracesdk.TracerProvider, error) {
-	// Create the Jaeger exporter
-
-	// TODO: better validation, resolve IP+port?
-	parts := strings.Split(hostAndPort, ":")
-	jaegerBatcher, err := jaeger.New(jaeger.WithAgentEndpoint(
-		jaeger.WithAgentHost(parts[0]),
-		jaeger.WithAgentPort(parts[1]),
-	))
+// Init returns an instance of Jaeger Tracer.
+func Init(service string) trace.Tracer {
+	os.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+	os.Setenv("OTEL_EXPORTER_OTLP_INSECURE", "true")
+	client := otlptracegrpc.NewClient(
+		otlptracegrpc.WithInsecure(),
+	)
+	exporter, err := otlptrace.New(context.Background(), client)
 	if err != nil {
-		return nil, err
+		log.Fatal("creating OTLP trace exporter: %w", err)
 	}
-	return tracesdk.NewTracerProvider(
-		// Always be sure to batch in production.
-		tracesdk.WithBatcher(jaegerBatcher),
-		// Record information about this application in an Resource.
-		tracesdk.WithResource(resource.NewWithAttributes(
-			semconv.SchemaURL,
-			semconv.ServiceNameKey.String(service),
-			attribute.String("environment", environment),
-			attribute.Int64("ID", id),
-		)),
-	), nil
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(newResource(service)),
+	)
+	lock.Lock()
+	tps = append(tps, tp)
+	lock.Unlock()
+
+	return tp.Tracer(service)
 }
 
-var tp *tracesdk.TracerProvider
-
-func init() {
-	hostAndPort, found := os.LookupEnv("JAEGER_TRACE")
-	if !found {
-		// Never collect traces if we're not gathering them
-		tp = tracesdk.NewTracerProvider(tracesdk.WithSampler(tracesdk.NeverSample()))
-		return
-	}
-	var err error
-	tp, err = tracerProvider(hostAndPort)
-	if err != nil {
-		panic(err)
-	}
-
-	otel.SetTracerProvider(tp)
-}
-
-func Tracer(name string) trace.Tracer {
-	if tp == nil {
-		panic("tracing provider hasn't been initialized")
-	}
-	return tp.Tracer(name)
+func newResource(service string) *resource.Resource {
+	return resource.NewWithAttributes(
+		semconv.SchemaURL,
+		semconv.ServiceName(service),
+		semconv.ServiceVersion("0.0.1"),
+	)
 }
 
 func Stop() {
-	if tp == nil {
+	lock.Lock()
+	if len(tps) == 0 {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*1)
-	defer cancel()
-	if err := tp.Shutdown(ctx); err != nil {
-		if _, ok := os.LookupEnv("JAEGER_TRACE"); ok {
+	for _, tp := range tps {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*1)
+		defer cancel()
+
+		if err := tp.Shutdown(ctx); err != nil {
 			panic(err)
 		}
 	}

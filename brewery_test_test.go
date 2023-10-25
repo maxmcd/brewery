@@ -63,9 +63,9 @@ func dockerLocalhost() string {
 func newRecorder(t *testing.T) *recorder.Recorder {
 	recorder, err := recorder.NewWithOptions(&recorder.Options{
 		CassetteName: "brewery",
-		// Mode:               recorder.ModeReplayOnly,
-		Mode:               recorder.ModePassthrough,
-		SkipRequestLatency: true,
+		Mode:         recorder.ModeReplayOnly,
+		// Mode:         recorder.ModeReplayWithNewEpisodes,
+		// SkipRequestLatency: true,
 	})
 	if err != nil {
 		t.Fatal(err)
