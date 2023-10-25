@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -61,8 +62,9 @@ func dockerLocalhost() string {
 
 func newRecorder(t *testing.T) *recorder.Recorder {
 	recorder, err := recorder.NewWithOptions(&recorder.Options{
-		CassetteName:       "brewery",
-		Mode:               recorder.ModeReplayOnly,
+		CassetteName: "brewery",
+		// Mode:               recorder.ModeReplayOnly,
+		Mode:               recorder.ModePassthrough,
 		SkipRequestLatency: true,
 	})
 	if err != nil {
@@ -143,7 +145,7 @@ func TestProxy(t *testing.T) {
 			NetworkMode: "host",
 			Image:       "homebrew/brew",
 			// Cmd:   []string{"bash", "-c", "echo hi && sleep 100000"},
-			Cmd: []string{"brew", "install", "-vd", "ruby"},
+			Cmd: []string{"brew", "install", "-vd", "cowsay"},
 			Env: map[string]string{
 				"HOMEBREW_ARTIFACT_DOMAIN": u.String(),
 				"HOMEBREW_API_DOMAIN":      u.String(),
@@ -159,7 +161,11 @@ func TestProxy(t *testing.T) {
 	}
 	_ = container
 
-	// start := time.Now()
+	logs, err := container.Logs(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	_, _ = io.Copy(os.Stdout, logs)
 	// _, logs, err := container.Exec(ctx, []string{"brew", "install", "-vd", "ruby"})
 	// if err != nil {
 	// 	t.Fatal(err)

@@ -13,16 +13,21 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/maxmcd/brewery/tracing"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var (
-	brewAPIRoot = "https://formulae.brew.sh/api/"
+	brewAPIRoot   = "https://formulae.brew.sh/api/"
+	networkTracer = tracing.Tracer("network")
+	diskTracer    = tracing.Tracer("disk")
 )
 
 type Brewery struct {
-	prefix string
-
-	httpClient *http.Client
+	prefix        string
+	cacheLocation string
+	httpClient    *http.Client
 }
 
 type Option func(b *Brewery)
@@ -36,7 +41,12 @@ func NewBrewery(opts ...Option) (*Brewery, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error getting brew prefix: %w: %q", err, prefix)
 	}
-	b := &Brewery{prefix: prefix}
+	cache, err := getBrewCache()
+	if err != nil {
+		return nil, fmt.Errorf("error getting brew cache: %w: %q", err, cache)
+	}
+
+	b := &Brewery{prefix: prefix, cacheLocation: cache}
 	for _, o := range opts {
 		o(b)
 	}
@@ -58,17 +68,32 @@ func (b *Brewery) cellar(a ...string) string {
 	return filepath.Join(append([]string{b.prefix, "/Cellar"}, a...)...)
 }
 
+func (b *Brewery) cache(a ...string) string {
+	return filepath.Join(append([]string{b.cacheLocation}, a...)...)
+}
+
 func (b *Brewery) getLocalVersion(name string) {
 	os.Stat(b.cellar(name))
 	// TODO...
 }
+
 func (b *Brewery) _getRequest(ctx context.Context, url string, rm func(*http.Request)) (resp *http.Response, err error) {
+	ctx, span := networkTracer.Start(ctx, "brewery._getRequest")
+	span.SetAttributes(attribute.String("url", url))
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+		}
+		span.End()
+	}()
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("error making request for %s: %w", url, err)
 	}
 	req = req.WithContext(ctx)
-	rm(req)
+	if rm != nil {
+		rm(req)
+	}
 	resp, err = b.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("error making %s request to %s: %w", http.MethodGet, url, err)
@@ -102,6 +127,82 @@ func (b *Brewery) FetchFormula(ctx context.Context, name string) (f Formula, err
 	return f, b.getRequest(ctx, url, func(r *http.Request) {}, &f)
 }
 
+func (b *Brewery) downloadAllFormulas(ctx context.Context) (err error) {
+	u := "https://formulae.brew.sh/api/formula.json"
+
+	resp, err := b._getRequest(ctx, u, nil)
+	if err == nil && resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		err = fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+	if err != nil {
+		return fmt.Errorf("error requesting %q: %w", u, err)
+	}
+	defer resp.Body.Close()
+	loc := b.cache("api", "formula.json")
+	f, err := os.Create(loc)
+	if err != nil {
+		return fmt.Errorf("error opening file %q: %w", loc, err)
+	}
+	if _, err = io.Copy(f, resp.Body); err != nil {
+		return fmt.Errorf("error writing to file %q: %w", loc, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("error closing file %q: %w", loc, err)
+	}
+	return nil
+}
+
+func (b *Brewery) Install(ctx context.Context, formula string) (err error) {
+	f, err := b.openOrDownloadAllFormulas(ctx)
+	if err != nil {
+		return fmt.Errorf("error opening or downloading all formulas: %w", err)
+	}
+	formulas, err := findFormulas(f, formula)
+	if err != nil {
+		return fmt.Errorf("error finding formula %s: %w", formula, err)
+	}
+	formulaData := formulas[0]
+	m, err := b.FetchManifest(ctx, formulaData.ManifestURL())
+	if err != nil {
+		return fmt.Errorf("error fetching manifest for %s: %w", formulaData.Name, err)
+	}
+
+	tb, err := m.TabForCurrentOS()
+	if err != nil {
+		return fmt.Errorf("error fetching information about the current os: %w", err)
+	}
+	dependencyFormulas := mapSlice(tb.RuntimeDependencies, func(d Dependency) string {
+		return d.FullName
+	})
+	_, _ = f.Seek(0, 0)
+	formulas, err = findFormulas(f, dependencyFormulas...)
+	if err != nil {
+		return fmt.Errorf("error finding formulas %v: %w", dependencyFormulas, err)
+	}
+
+	return nil
+}
+
+func mapSlice[T any, U any](s []T, f func(T) U) []U {
+	r := make([]U, len(s))
+	for i, v := range s {
+		r[i] = f(v)
+	}
+	return r
+}
+
+func (b *Brewery) openOrDownloadAllFormulas(ctx context.Context) (f *os.File, err error) {
+	loc := b.cache("api", "formula.json")
+	if _, err := os.Stat(loc); err != nil && os.IsNotExist(err) {
+		// TODO: handle other errors
+		if err := b.downloadAllFormulas(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return os.Open(loc)
+}
+
 func (b *Brewery) FetchManifest(ctx context.Context, url string) (m Manifest, err error) {
 	return m, b.getRequest(ctx, url, prepareGHCRRequest, &m)
 }
@@ -119,7 +220,6 @@ func jsonPrettyPrint[T any](t T) {
 func (b *Brewery) StableBottleURL(f Formula) (string, error) {
 	files := f.Bottle.Stable.Files[b.bottleOSString()]
 	if files.Cellar != ":any" && files.Cellar != ":any_skip_relocation" && files.Cellar != b.cellar() {
-		jsonPrettyPrint(f)
 		return "", fmt.Errorf("cellar mismatch: %q != %q", files.Cellar, b.prefix)
 	}
 	return files.URL, nil

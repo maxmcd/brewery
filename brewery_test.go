@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/maxmcd/brewery/tracing"
 	"github.com/maxmcd/reptar"
 	"golang.org/x/sync/errgroup"
 )
@@ -78,11 +79,14 @@ func BenchmarkTarGzipUnarchive(b *testing.B) {
 }
 
 func TestFormula(t *testing.T) {
+	ctx, span := networkTracer.Start(context.Background(), "brewery-test")
+	defer span.End()
+	defer tracing.Stop()
 	f, err := os.Open("/home/ubuntu/.cache/Homebrew/api/formula.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	formulas, err := findFormulas(f, "ffmpeg")
+	formulas, err := findFormulas(f, "ruby")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +101,7 @@ func TestFormula(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m, err := b.FetchManifest(context.Background(), formula.ManifestURL())
+	m, err := b.FetchManifest(ctx, formula.ManifestURL())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +130,7 @@ func TestFormula(t *testing.T) {
 	}
 	dir := t.TempDir()
 
-	eg, ctx := errgroup.WithContext(context.Background())
+	eg, ctx := errgroup.WithContext(ctx)
 	for _, f := range formulas {
 		formula := f
 		eg.Go(func() error {
@@ -154,14 +158,6 @@ func TestFormula(t *testing.T) {
 	if err := eg.Wait(); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func mapSlice[T any, U any](s []T, f func(T) U) []U {
-	r := make([]U, len(s))
-	for i, v := range s {
-		r[i] = f(v)
-	}
-	return r
 }
 
 type T interface {
