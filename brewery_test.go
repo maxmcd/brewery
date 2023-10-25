@@ -86,10 +86,11 @@ type T interface {
 
 func newRecorder(t T) *recorder.Recorder {
 	recorder, err := recorder.NewWithOptions(&recorder.Options{
-		CassetteName: "brewery",
-		Mode:         recorder.ModeReplayWithNewEpisodes,
+		CassetteName: "brewery-recorder",
+		// Mode:         recorder.ModeReplayWithNewEpisodes,
 		// Mode:         recorder.ModeRecordOnly,
-		// SkipRequestLatency: true,
+		Mode: recorder.ModeReplayOnly,
+		SkipRequestLatency: true,
 	})
 	if err != nil {
 		t.Fatal(err)
