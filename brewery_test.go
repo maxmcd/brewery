@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -16,6 +17,88 @@ import (
 	"golang.org/x/sync/errgroup"
 	"gopkg.in/dnaeon/go-vcr.v3/recorder"
 )
+
+func TestFormulaHack(t *testing.T) {
+	formulaIndex := map[string][2]int{}
+
+	searchPrefix := []byte("\n  {\"name\":\"")
+	newlineAndSpaceLen := len([]byte("\n  "))
+	commaLen := len([]byte(","))
+
+	f, err := os.Open("/Users/maxm/.cache/brewery/api/formula.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := bufio.NewReader(f)
+
+	{
+		// open bracket
+		bs, err := r.ReadBytes('\n')
+		fmt.Println(string(bs), err)
+	}
+	{
+		bs, err := r.ReadBytes('\n')
+		fmt.Println(string(bs), err)
+		namePrefix := []byte(`name":"`)
+		fmt.Println(string(bs[bytes.Index(bs, namePrefix)+len(namePrefix) : bytes.Index(bs, []byte(`",`))]))
+		var formula Formula
+		fmt.Println(json.Unmarshal(bs[:bytes.LastIndexByte(bs, '}')+1], &formula))
+		fmt.Println(formula)
+	}
+	return
+
+	f.Seek(24698064, 0)
+	b := make([]byte, 4015)
+	_, _ = f.Read(b)
+	fmt.Println(string(b))
+	return
+
+	scanner := bufio.NewScanner(f)
+
+	position := 0
+	count := 0
+	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+		if atEOF && len(data) == 0 {
+			return 0, nil, nil
+		}
+		start := bytes.Index(data, searchPrefix)
+		if start == -1 {
+			return 0, nil, nil
+		}
+		end := bytes.Index(data[start+len(searchPrefix):], searchPrefix)
+		if end == -1 {
+			if !atEOF {
+				return 0, nil, nil
+			}
+			end = bytes.LastIndex(data, []byte("}")) + 1 - len(searchPrefix)
+		}
+
+		offset := start + newlineAndSpaceLen
+		size := end + len(searchPrefix) - commaLen - newlineAndSpaceLen
+		fmt.Println(position+offset, size)
+		advance = offset + size
+		position += advance
+		count += 1
+		fmt.Println(advance)
+		if atEOF {
+			// Scanner will not scan the final bytes after EOF unless we return
+			// bytes. Return bytes here so that the input advances.
+			// Alternatively we could loop over the buffer ourselves and process
+			// each section.
+			return advance, data[offset : offset+size], nil
+		}
+		return advance, nil, nil
+	})
+
+	for scanner.Scan() {
+		_ = scanner.Text()
+	}
+
+	fmt.Println(count)
+	_ = f
+	_ = formulaIndex
+}
 
 func Test_cloneDirWithSymlinks(t *testing.T) {
 	if err := cloneDirWithSymlinks("/home/linuxbrew/.linuxbrew/Cellar/ruby", t.TempDir()); err != nil {
