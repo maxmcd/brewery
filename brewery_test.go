@@ -1,6 +1,8 @@
 package brewery
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/maxmcd/brewery/tracing"
 	"github.com/maxmcd/reptar"
+	"github.com/stretchr/testify/assert"
 	"golang.org/x/sync/errgroup"
 	"gopkg.in/dnaeon/go-vcr.v3/recorder"
 )
@@ -89,7 +92,7 @@ func newRecorder(t T) *recorder.Recorder {
 		CassetteName: "brewery-recorder",
 		// Mode:         recorder.ModeReplayWithNewEpisodes,
 		// Mode:         recorder.ModeRecordOnly,
-		Mode: recorder.ModeReplayOnly,
+		Mode:               recorder.ModeReplayOnly,
 		SkipRequestLatency: true,
 	})
 	if err != nil {
@@ -119,12 +122,12 @@ func brewery(t T) *Brewery {
 func TestInstall(t *testing.T) {
 	names := []string{"Install", "InstallParallel", "InstallParallel2"}
 	for i, fn := range []func(context.Context, *Brewery) error{
-		func(ctx context.Context, b *Brewery) error {
-			return b.Install(ctx, "ruby")
-		},
-		func(ctx context.Context, b *Brewery) error {
-			return b.InstallParallel(ctx, "ruby")
-		},
+		// func(ctx context.Context, b *Brewery) error {
+		// 	return b.Install(ctx, "ruby")
+		// },
+		// func(ctx context.Context, b *Brewery) error {
+		// 	return b.InstallParallel(ctx, "ruby")
+		// },
 		func(ctx context.Context, b *Brewery) error {
 			return b.InstallParallel2(ctx, "ruby")
 		},
@@ -139,6 +142,84 @@ func TestInstall(t *testing.T) {
 		})
 	}
 	tracing.Stop()
+}
+
+func TestFormulaIndex(t *testing.T) {
+	b, err := NewBrewery()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(b.cache("api", "formula.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner := bufio.NewScanner(f)
+	scanner.Split(jsonObjectSplitFunc)
+
+	for scanner.Scan() {
+		foo := scanner.Text()
+		_ = foo
+	}
+}
+
+func BenchmarkFormulaIndex(b *testing.B) {
+	br, err := NewBrewery()
+	if err != nil {
+		b.Fatal(err)
+	}
+	f, err := os.Open(br.cache("api", "formula.json"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	for i := 0; i < b.N; i++ {
+		_, _ = f.Seek(0, 0)
+		scanner := bufio.NewScanner(f)
+		scanner.Split(jsonObjectSplitFunc)
+
+		for scanner.Scan() {
+			foo := scanner.Text()
+			_ = foo
+		}
+	}
+}
+
+func BenchmarkFormulaNoIndex(b *testing.B) {
+	br, err := NewBrewery()
+	if err != nil {
+		b.Fatal(err)
+	}
+	f, err := os.Open(br.cache("api", "formula.json"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	for i := 0; i < b.N; i++ {
+		_, _ = f.Seek(0, 0)
+		_, _ = findFormulas(context.Background(), f, "ruby")
+	}
+}
+
+func Test_jsonObjectSplitFunc(t *testing.T) {
+	for _, tt := range []struct {
+		src   string
+		lines []string
+	}{
+		{"[{},{{}}]", []string{"{}", "{{}}"}},
+		{`[{},{"f":"\}"}]`, []string{"{}", `{"f":"\}"}`}},
+		{"[ {},    {{}}, ]", []string{"{}", "{{}}"}},
+		{"{},{{}}", []string{"{}", "{{}}"}},
+		{"[{},{{", []string{"{}"}},
+	} {
+		t.Run(tt.src, func(t *testing.T) {
+			scanner := bufio.NewScanner(bytes.NewBufferString(tt.src))
+			scanner.Split(jsonObjectSplitFunc)
+
+			out := []string{}
+			for scanner.Scan() {
+				out = append(out, scanner.Text())
+			}
+			assert.Equal(t, tt.lines, out)
+		})
+	}
 }
 
 func BenchmarkInstall(b *testing.B) {

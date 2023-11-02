@@ -650,8 +650,6 @@ func getBrewPrefix() (string, error) {
 }
 
 func getBrewCache() (string, error) {
-	// TODO: remove
-	return "/Users/maxm/.cache/brewery", nil
 	b, err := exec.Command("brew", "--cache").CombinedOutput()
 	if err == nil {
 		return strings.TrimSpace(string(b)), nil
@@ -693,4 +691,38 @@ func cloneDirWithSymlinks(src, dst string) error {
 		return err
 	}
 	return nil
+}
+
+func jsonObjectSplitFunc(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	opening := bytes.IndexRune(data, '{')
+	if opening == -1 {
+		return 0, nil, nil
+	}
+	counter := 0
+
+	i := 0
+	for {
+		idx := bytes.IndexAny(data[opening+i:], "{}")
+		if idx == -1 {
+			break
+		}
+		if data[opening+i:][idx] == '{' {
+			// handle escaped "\}" or "\{"
+			if idx == 0 || data[opening+i:][idx-1] != '\\' {
+				counter++
+			}
+		}
+		if data[opening+i:][idx] == '}' {
+			if idx == 0 || data[opening+i:][idx-1] != '\\' {
+				counter--
+			}
+		}
+		i += idx + 1
+		if counter == 0 {
+			advance := len(data[opening:][:i]) + opening
+			// return advance, data[opening:][:i], nil
+			return advance, nil, nil
+		}
+	}
+	return 0, nil, nil
 }
